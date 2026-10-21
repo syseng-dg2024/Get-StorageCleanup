@@ -1,4 +1,4 @@
-﻿function Invoke-ServerCleanup {
+﻿function Invoke-DriveCleanup {
     <#
     .SYNOPSIS
     Performs the storage cleanup. Called by the scheduled task created from the menu (Clean Storage).
@@ -15,7 +15,7 @@
     $SkipDism           = $false
 
     if (-not (Test-Path $LogFolder)) { New-Item -ItemType Directory -Path $LogFolder | Out-Null }
-    $script:CleanupLogPath = Join-Path $LogFolder "ServerCleanup_$(Get-Date -Format 'MM-dd-yyyy_hhmmtt').log"
+    $script:CleanupLogPath = Join-Path $LogFolder "StorageCleanup_$(Get-Date -Format 'MM-dd-yyyy_hhmmtt').log"
     $script:CleanupBuffer  = @()
     $Deleted = 0; $Compressed = 0
     $Cutoff = (Get-Date).AddDays(-$DaysToDelete)

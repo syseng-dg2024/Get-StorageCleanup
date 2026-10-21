@@ -6,7 +6,7 @@
     CompanyName       = 'Systems Engineering'
     Description       = 'Menu-driven storage analysis and cleanup.'
     PowerShellVersion = '5.1'
-    FunctionsToExport = @('Get-StorageCleanup','Invoke-ServerCleanup')
+    FunctionsToExport = @('Get-StorageCleanup','Invoke-DriveCleanup')
     CmdletsToExport   = @()
     VariablesToExport = @()
     AliasesToExport   = @()
