@@ -1,43 +1,18 @@
-﻿function Start-ServerCleanup {
+﻿function Invoke-ServerCleanup {
     <#
     .SYNOPSIS
-    Cleans temp/system bloat, compresses IIS logs, runs DISM cleanup, and reports space gained.
-    .PARAMETER AsScheduledTask
-    Registers a one-time SYSTEM scheduled task that runs the cleanup in the background (original script behavior).
-    The task removes itself when finished.
-    .PARAMETER RunningAsTask
-    Internal. Used by the scheduled task to unregister itself on completion.
+    Performs the storage cleanup. Called by the scheduled task created from the menu (Clean Storage).
+    Settings come from $script:Config in Get-StorageCleanup.psm1.
     #>
     [CmdletBinding()]
-    param(
-        [int]$DaysToDelete = 7,
-        [string]$LogFolder = 'C:\Temp',
-        [switch]$AsScheduledTask,
-        [switch]$RunningAsTask,
-        [switch]$SkipDism,
-        [int]$DismTimeoutMinutes = 10,
-        [int]$ReportFilesOverMB = 0   # >0 runs a large file report on the system drive after cleanup
-    )
+    param([switch]$RunningAsTask)
 
-    $TaskName = 'Start-ServerCleanup'
-
-    if (-not (Test-IsAdmin)) { Write-Host 'ERROR: Run from an elevated PowerShell prompt.' -ForegroundColor Red; return }
-
-    if ($AsScheduledTask) {
-        $psd1 = Join-Path (Get-Module Get-StorageCleanup).ModuleBase 'Get-StorageCleanup.psd1'
-        if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-        }
-        $cmd = "Import-Module '$psd1' -Force; Start-ServerCleanup -DaysToDelete $DaysToDelete -LogFolder '$LogFolder' -DismTimeoutMinutes $DismTimeoutMinutes -ReportFilesOverMB $ReportFilesOverMB -RunningAsTask"
-        if ($SkipDism) { $cmd += ' -SkipDism' }
-        $action    = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NonInteractive -NoProfile -ExecutionPolicy Bypass -Command `"$cmd`""
-        $trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(10)
-        $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 4)
-        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-        Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
-        Write-Host "Task '$TaskName' registered; cleanup begins in ~10 seconds. Logs: $LogFolder\ServerCleanup_*.log" -ForegroundColor Cyan
-        return
-    }
+    $TaskName           = 'Start-ServerCleanup'
+    $DaysToDelete       = $script:Config.DaysToDelete
+    $LogFolder          = $script:Config.LogFolder
+    $DismTimeoutMinutes = $script:Config.DismTimeoutMinutes
+    $ReportFilesOverMB  = $script:Config.CleanupLargeFileReportMB
+    $SkipDism           = $false
 
     if (-not (Test-Path $LogFolder)) { New-Item -ItemType Directory -Path $LogFolder | Out-Null }
     $script:CleanupLogPath = Join-Path $LogFolder "ServerCleanup_$(Get-Date -Format 'yyyy-MM-dd_HHmm').log"

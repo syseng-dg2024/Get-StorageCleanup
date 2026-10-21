@@ -1,23 +1,12 @@
-﻿function Get-LargestFolders {
-    <#
-    .SYNOPSIS
-    Interactive drive analysis: reports largest folders AND largest files, with drill-down.
-    #>
-    [CmdletBinding()]
-    param(
-        [string]$OutputFile = (Join-Path (Get-Location).Path 'FindLargestFilesAndFolders.txt'),
-        [int]$Top = 10,
-        [int]$FolderThresholdMB = 1024,
-        [int]$FileThresholdMB = 500,
-        [string[]]$FileExtension,
-        [switch]$SkipFiles
-    )
-    $script:AnalyzeOutput = $OutputFile
+﻿function Invoke-DriveAnalysis {
+    $Top = $script:Config.Top
+    $FolderThresholdMB = $script:Config.FolderThresholdMB
     $folderBytes = [long]$FolderThresholdMB * [long]1048576
-    Clear-Host
-    "Script launched: $(Get-Date -Format 'dd-MMM-yyyy HH:mm:ss')  (Get-StorageCleanup v$(Get-StorageCleanupVersion))" | Out-File -Width 150 $OutputFile
 
     $drive = Select-Drive
+    if (-not $drive) { return }
+    Start-AnalyzeReport
+
     $root = "$drive\"
     $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$drive'"
     Write-AnalyzeLog
@@ -36,10 +25,8 @@
             Write-AnalyzeLog $h; Write-AnalyzeLog ('-' * $h.Length)
             Write-FolderResults -SortedResults $res
         }
-        if (-not $SkipFiles) {
-            Write-AnalyzeLog
-            Find-LargeFiles -Path $path -ThresholdMB $FileThresholdMB -Top $Top -Extension $FileExtension
-        }
+        Write-AnalyzeLog
+        Find-LargeFiles -Path $path -ThresholdMB $script:Config.FileThresholdMB -Top $script:Config.FileTop
         return ,$res
     }
 
@@ -50,20 +37,22 @@
     $history = @()
     while ($true) {
         Write-Host ' '
-        $opt = "1-$($current.Count) drill in, 0 custom path"
-        if ($history.Count -gt 0) { $opt += ', B back' }
-        Write-Host "  Select a folder: $opt, Q quit"
+        if ($history.Count -gt 0) { $back = 'B up one level' } else { $back = 'B back to menu' }
+        Write-Host "  Select a folder: 1-$($current.Count) drill in, 0 custom path, $back"
         $sel = (Read-Host 'Enter selection').Trim()
-        if ($sel -match '^[Qq]$') { Write-AnalyzeLog 'Exiting.'; Write-Host "Report saved to: $OutputFile"; return }
-        if ($sel -match '^[Bb]$' -and $history.Count -gt 0) {
+
+        if ($sel -match '^[Bb]$') {
+            if ($history.Count -eq 0) { Write-Host "Report saved to: $($script:AnalyzeOutput)"; Wait-ForKey; return }
             $current = $history[-1]
-            $history = if ($history.Count -gt 1) { $history[0..($history.Count - 2)] } else { @() }
+            if ($history.Count -gt 1) { $history = $history[0..($history.Count - 2)] } else { $history = @() }
             Write-Host 'Previous level:'; Write-FolderResults -SortedResults $current
             continue
         }
         if ($sel -notmatch '^\d+$' -or [int]$sel -gt $current.Count) { Write-Host ' Invalid selection.'; continue }
-        if ([int]$sel -eq 0) { $path = Read-Host 'Enter custom folder path'; if (-not (Test-Path $path)) { Write-Host ' Path not found.'; continue } }
-        else { $path = $current[[int]$sel - 1]['Path'] }
+        if ([int]$sel -eq 0) {
+            $path = Read-Host 'Enter custom folder path'
+            if (-not (Test-Path $path)) { Write-Host ' Path not found.'; continue }
+        } else { $path = $current[[int]$sel - 1]['Path'] }
 
         Write-AnalyzeTimestamp 'Drill-down scan started:'
         $sub = & $scan $path

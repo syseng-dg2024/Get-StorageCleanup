@@ -2,9 +2,24 @@
 <#
 Get-StorageCleanup module loader.
 Version is defined in Get-StorageCleanup.psd1 (semantic versioning, see CHANGELOG.md).
-Public\  = exported commands.  Private\ = internal helpers (not exported).
+Public\  = exported commands (Get-StorageCleanup menu, Invoke-ServerCleanup used by the scheduled task).
+Private\ = internal helpers (not exported).
 DISCLAIMER: Partly AI-assisted. Review and test in non-production before use on live systems.
 #>
+
+# ---------------------------------------------------------------
+# Settings - edit here
+# ---------------------------------------------------------------
+$script:Config = @{
+    LogFolder                = 'C:\Temp'   # cleanup logs and analysis reports
+    DaysToDelete             = 7           # cleanup: delete files older than this
+    DismTimeoutMinutes       = 10          # cleanup: kill DISM after this long
+    CleanupLargeFileReportMB = 0           # cleanup: >0 adds a report-only list of files this big (0 = off)
+    Top                      = 10          # analysis: top N folders per level
+    FolderThresholdMB        = 1024        # analysis: minimum folder size to list
+    FileThresholdMB          = 500         # analysis: minimum file size to list (.bak etc.)
+    FileTop                  = 25          # analysis: top N files per level
+}
 
 # Folders skipped during analysis (junctions / pseudo-folders)
 $script:SkipFolders = @('documents and settings','application data','local settings','my documents','system volume information','$recycle.bin')

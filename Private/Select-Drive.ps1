@@ -10,7 +10,8 @@
         $list += $d.DeviceID; $idx++
     }
     while ($true) {
-        $s = (Read-Host 'Enter number to select drive').Trim()
+        $s = (Read-Host 'Enter number to select drive (B to go back)').Trim()
+        if ($s -match '^[Bb]$') { return $null }
         if ($s -match '^\d+$' -and [int]$s -ge 1 -and [int]$s -le $list.Count) { return $list[[int]$s - 1] }
         Write-Host " Invalid selection - enter 1 to $($list.Count)."
     }
