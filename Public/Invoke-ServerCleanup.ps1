@@ -15,7 +15,7 @@
     $SkipDism           = $false
 
     if (-not (Test-Path $LogFolder)) { New-Item -ItemType Directory -Path $LogFolder | Out-Null }
-    $script:CleanupLogPath = Join-Path $LogFolder "ServerCleanup_$(Get-Date -Format 'yyyy-MM-dd_HHmm').log"
+    $script:CleanupLogPath = Join-Path $LogFolder "ServerCleanup_$(Get-Date -Format 'MM-dd-yyyy_hhmmtt').log"
     $script:CleanupBuffer  = @()
     $Deleted = 0; $Compressed = 0
     $Cutoff = (Get-Date).AddDays(-$DaysToDelete)
@@ -27,8 +27,8 @@
         $BeforePct = [double]("{0:F1}" -f (($BeforeGB / $TotalGB) * 100))
 
         Write-CleanupLog '======================================================'
-        Write-CleanupLog "CLEANUP STARTED: $(Get-Date)  (Get-StorageCleanup v$(Get-StorageCleanupVersion))"
-        Write-CleanupLog "Days threshold: $DaysToDelete (cutoff: $Cutoff)"
+        Write-CleanupLog "CLEANUP STARTED: $(Get-Date -Format 'MM-dd-yyyy hh:mm:ss tt')  (Get-StorageCleanup v$(Get-StorageCleanupVersion))"
+        Write-CleanupLog "Days threshold: $DaysToDelete (cutoff: $($Cutoff.ToString('MM-dd-yyyy hh:mm:ss tt')))"
         Write-CleanupLog "Start Free Space: $BeforeGB GB ($BeforePct% free)"
         Write-CleanupLog '======================================================'
 
@@ -162,7 +162,7 @@
   FILES DELETED:        $Deleted
   FILES COMPRESSED:     $Compressed
   Log: $($script:CleanupLogPath)
-  Completed: $(Get-Date)
+  Completed: $(Get-Date -Format 'MM-dd-yyyy hh:mm:ss tt')
 =======================================================
 "@
     } catch {
