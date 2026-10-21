@@ -1,0 +1,201 @@
+﻿function Start-ServerCleanup {
+    <#
+    .SYNOPSIS
+    Cleans temp/system bloat, compresses IIS logs, runs DISM cleanup, and reports space gained.
+    .PARAMETER AsScheduledTask
+    Registers a one-time SYSTEM scheduled task that runs the cleanup in the background (original script behavior).
+    The task removes itself when finished.
+    .PARAMETER RunningAsTask
+    Internal. Used by the scheduled task to unregister itself on completion.
+    #>
+    [CmdletBinding()]
+    param(
+        [int]$DaysToDelete = 7,
+        [string]$LogFolder = 'C:\Temp',
+        [switch]$AsScheduledTask,
+        [switch]$RunningAsTask,
+        [switch]$SkipDism,
+        [int]$DismTimeoutMinutes = 10,
+        [int]$ReportFilesOverMB = 0   # >0 runs a large file report on the system drive after cleanup
+    )
+
+    $TaskName = 'Start-ServerCleanup'
+
+    if (-not (Test-IsAdmin)) { Write-Host 'ERROR: Run from an elevated PowerShell prompt.' -ForegroundColor Red; return }
+
+    if ($AsScheduledTask) {
+        $psd1 = Join-Path (Get-Module Get-StorageCleanup).ModuleBase 'Get-StorageCleanup.psd1'
+        if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        }
+        $cmd = "Import-Module '$psd1' -Force; Start-ServerCleanup -DaysToDelete $DaysToDelete -LogFolder '$LogFolder' -DismTimeoutMinutes $DismTimeoutMinutes -ReportFilesOverMB $ReportFilesOverMB -RunningAsTask"
+        if ($SkipDism) { $cmd += ' -SkipDism' }
+        $action    = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NonInteractive -NoProfile -ExecutionPolicy Bypass -Command `"$cmd`""
+        $trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(10)
+        $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 4)
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+        Write-Host "Task '$TaskName' registered; cleanup begins in ~10 seconds. Logs: $LogFolder\ServerCleanup_*.log" -ForegroundColor Cyan
+        return
+    }
+
+    if (-not (Test-Path $LogFolder)) { New-Item -ItemType Directory -Path $LogFolder | Out-Null }
+    $script:CleanupLogPath = Join-Path $LogFolder "ServerCleanup_$(Get-Date -Format 'yyyy-MM-dd_HHmm').log"
+    $script:CleanupBuffer  = @()
+    $Deleted = 0; $Compressed = 0
+    $Cutoff = (Get-Date).AddDays(-$DaysToDelete)
+
+    try {
+        $c0 = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+        $TotalGB  = [double]("{0:F2}" -f ($c0.Size / 1GB))
+        $BeforeGB = [double]("{0:F2}" -f ($c0.FreeSpace / 1GB))
+        $BeforePct = [double]("{0:F1}" -f (($BeforeGB / $TotalGB) * 100))
+
+        Write-CleanupLog '======================================================'
+        Write-CleanupLog "CLEANUP STARTED: $(Get-Date)  (Get-StorageCleanup v$(Get-StorageCleanupVersion))"
+        Write-CleanupLog "Days threshold: $DaysToDelete (cutoff: $Cutoff)"
+        Write-CleanupLog "Start Free Space: $BeforeGB GB ($BeforePct% free)"
+        Write-CleanupLog '======================================================'
+
+        # [1/9] Pending reboot
+        Write-CleanupLog '[1/9] Checking for pending reboots...'
+        $reasons = Get-PendingReboot
+        if ($reasons.Count -gt 0) {
+            foreach ($r in $reasons) { Write-CleanupLog "WARNING: Pending Reboot - $r" }
+            Write-CleanupLog 'WARNING: DISM may hang with a pending reboot. Proceeding anyway.'
+        } else { Write-CleanupLog 'No pending reboot detected.' }
+
+        # [2/9] DISM
+        if ($SkipDism) {
+            Write-CleanupLog '[2/9] DISM skipped by parameter.'
+        } else {
+            Write-CleanupLog '[2/9] Starting DISM Component Cleanup...'
+            $so = Join-Path $LogFolder 'dism_stdout.tmp'; $se = Join-Path $LogFolder 'dism_stderr.tmp'
+            $p = Start-Process 'dism.exe' -ArgumentList '/online /Cleanup-Image /StartComponentCleanup /NoRestart' -PassThru -NoNewWindow -RedirectStandardOutput $so -RedirectStandardError $se
+            $TimeoutMs = $DismTimeoutMinutes * 60000; $Beat = 30000; $el = 0
+            while (-not $p.HasExited -and $el -lt $TimeoutMs) {
+                Start-Sleep -Milliseconds $Beat; $el += $Beat
+                Write-CleanupLog ("DISM: Still running... ({0:F1} min)" -f ($el / 60000)); Clear-CleanupLogBuffer
+            }
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; Write-CleanupLog "ERROR: DISM killed - exceeded $DismTimeoutMinutes min timeout." }
+            else { Write-CleanupLog ("DISM completed in {0:F1} min - Exit Code: {1}" -f ($el / 60000), $p.ExitCode) }
+            foreach ($f in @(@($so,'DISM'),@($se,'DISM ERROR'))) {
+                if (Test-Path $f[0]) {
+                    foreach ($l in (Get-Content $f[0] -ErrorAction SilentlyContinue)) { if ($l.Trim()) { Write-CleanupLog "$($f[1]): $l" } }
+                    Remove-Item $f[0] -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+
+        # [3/9] Stop services
+        $Services = @('wuauserv','bits','cryptsvc'); $Nable = 'N-able Patch Repository Service'
+        Write-CleanupLog "[3/9] Stopping services: $($Services -join ', '), $Nable"
+        Stop-Service -Name $Services -Force -ErrorAction SilentlyContinue
+        Stop-Service -Name $Nable -Force -ErrorAction SilentlyContinue
+
+        # [4/9] IIS
+        if (Test-Path 'C:\inetpub\logs\LogFiles\') {
+            Write-CleanupLog "[4/9] Compressing IIS logs older than $DaysToDelete days..."
+            $dirs = Get-ChildItem 'C:\inetpub\logs\LogFiles\' -Include *.log -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -lt $Cutoff -and $_.Attributes -notmatch 'Compressed' } |
+                Select-Object -ExpandProperty DirectoryName -Unique
+            foreach ($dir in $dirs) {
+                Write-CleanupLog "ACTION: Compressing $dir"
+                Start-Process 'compact.exe' -ArgumentList "/c /s:`"$dir`"" -Wait -NoNewWindow
+                $Compressed += (Get-ChildItem $dir -Filter *.log -ErrorAction SilentlyContinue).Count
+            }
+            $fr = 'C:\inetpub\logs\FailedReqLogFiles'
+            if (Test-Path $fr) { Start-Process 'compact.exe' -ArgumentList "/c /s:`"$fr`"" -Wait -NoNewWindow }
+            Write-CleanupLog "IIS compression complete. Directories: $(@($dirs).Count)"
+        } else { Write-CleanupLog '[4/9] IIS log path not found - skipping.' }
+
+        # [5/9] N-able cache
+        $np = 'C:\Program Files (x86)\N-able Technologies\NablePatchCache'
+        if (Test-Path $np) {
+            $n = (Get-ChildItem $np -Recurse -File -ErrorAction SilentlyContinue).Count
+            Write-CleanupLog "[5/9] Deleting $n files from N-able cache."
+            Remove-Item "$np\*" -Recurse -Force -ErrorAction SilentlyContinue
+            $Deleted += $n
+        } else { Write-CleanupLog '[5/9] N-able Patch Cache not found - skipping.' }
+
+        # [6/9] Temp & bloat
+        $targets = @(
+            'C:\Windows\Temp\*','C:\Users\*\AppData\Local\Temp\*','C:\Windows\SoftwareDistribution\Download\*',
+            'C:\Windows\SoftwareDistribution\DataStore\Logs\*','C:\Windows\System32\config\systemprofile\AppData\Local\Temp\*',
+            'C:\Windows\System32\config\systemprofile\AppData\Local\Microsoft\Windows\INetCache\*',
+            'C:\Windows\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache\*',
+            'C:\ProgramData\Microsoft\Windows\WER\ReportQueue\*','C:\ProgramData\Microsoft\Windows\WER\ReportArchive\*',
+            'C:\Windows\Logs\CBS\*','C:\Windows\ServiceProfiles\LocalService\AppData\Local\FontCache\*',
+            'C:\Users\*\AppData\Local\Microsoft\Windows\INetCache\*')
+        Write-CleanupLog '[6/9] Purging temporary files and system bloat...'
+        foreach ($t in $targets) {
+            $cnt = 0
+            Get-ChildItem $t -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -lt $Cutoff -and $_.Name -notlike '*.log' } |
+                ForEach-Object {
+                    Write-CleanupLog "ACTION: Deleted $($_.FullName)"
+                    Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+                    $Deleted++; $cnt++
+                }
+            Write-CleanupLog "Path '$t' - $cnt file(s) deleted."
+        }
+
+        # [7/9] Archives
+        Write-CleanupLog '[7/9] Removing old archived logs from C:\Windows\Logs\...'
+        $ac = 0
+        Get-ChildItem 'C:\Windows\Logs\*' -Include *.cab,*.gz,*.zip -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -lt $Cutoff } |
+            ForEach-Object { Write-CleanupLog "ACTION: Deleted Archive $($_.FullName)"; Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue; $Deleted++; $ac++ }
+        Write-CleanupLog "Archives removed: $ac"
+
+        # [8/9] Recycle bin + minidumps
+        Write-CleanupLog '[8/9] Emptying Recycle Bin...'
+        try { Clear-RecycleBin -Force -ErrorAction Stop; Write-CleanupLog 'Recycle Bin emptied.' }
+        catch { Write-CleanupLog "WARNING: Recycle Bin empty or inaccessible - $($_.Exception.Message)" }
+        if (Test-Path 'C:\Windows\Minidump') {
+            $dc = 0
+            Get-ChildItem 'C:\Windows\Minidump' -File -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $Cutoff } |
+                ForEach-Object { Write-CleanupLog "ACTION: Deleted Minidump $($_.FullName)"; Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue; $Deleted++; $dc++ }
+            Write-CleanupLog "Minidumps removed: $dc"
+        }
+
+        # [9/9] Restart services
+        Write-CleanupLog '[9/9] Restarting services...'
+        Start-Service -Name $Services -ErrorAction SilentlyContinue
+        Start-Service -Name $Nable -ErrorAction SilentlyContinue
+
+        # Optional large-file report (report only, never deletes)
+        if ($ReportFilesOverMB -gt 0) {
+            Write-CleanupLog "Reporting files >= $ReportFilesOverMB MB on C:\ (report only)..."
+            $big = Find-LargeFiles -Path 'C:\' -ThresholdMB $ReportFilesOverMB -Top 25 -PassThru -Quiet
+            foreach ($b in $big) { Write-CleanupLog ("LARGE FILE: {0,10:N0} MB  {1}  (modified {2:yyyy-MM-dd})" -f ($b.Length / 1MB), $b.FullName, $b.LastWriteTime) }
+        }
+
+        $c1 = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+        $AfterGB  = [double]("{0:F2}" -f ($c1.FreeSpace / 1GB))
+        $AfterPct = [double]("{0:F1}" -f (($AfterGB / $TotalGB) * 100))
+        $Gained   = [double]("{0:F2}" -f ($AfterGB - $BeforeGB))
+        Write-CleanupLog @"
+
+=======================================================
+               CLEANUP SUMMARY (C: DRIVE)
+=======================================================
+  Total Disk Capacity:  $TotalGB GB
+  STARTING FREE SPACE:  $BeforeGB GB ($BeforePct%)
+  ENDING FREE SPACE:    $AfterGB GB ($AfterPct%)
+  TOTAL SPACE GAINED:   $Gained GB
+  FILES DELETED:        $Deleted
+  FILES COMPRESSED:     $Compressed
+  Log: $($script:CleanupLogPath)
+  Completed: $(Get-Date)
+=======================================================
+"@
+    } catch {
+        Write-CleanupLog "FATAL ERROR: $($_.Exception.Message) at line $($_.InvocationInfo.ScriptLineNumber)"
+    } finally {
+        Clear-CleanupLogBuffer
+        if ($RunningAsTask -and (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        }
+    }
+}
