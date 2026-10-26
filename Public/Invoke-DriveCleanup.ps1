@@ -104,22 +104,23 @@
             'C:\Users\*\AppData\Local\Microsoft\Windows\INetCache\*')
         Write-CleanupLog '[6/9] Purging temporary files and system bloat...'
         foreach ($t in $targets) {
-            $cnt = 0
-            Get-ChildItem $t -Recurse -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.LastWriteTime -lt $Cutoff -and $_.Name -notlike '*.log' } |
-                ForEach-Object {
-                    Write-CleanupLog "ACTION: Deleted $($_.FullName)"
-                    Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
-                    $Deleted++; $cnt++
-                }
-            Write-CleanupLog "Path '$t' - $cnt file(s) deleted."
+
+            $files = Get-ChildItem $t -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -lt $Cutoff -and $_.Name -notlike '*.log' -and $_.Attributes -notmatch 'ReparsePoint' }
+            if ($files) {
+                $files | Select-Object -First 5 | ForEach-Object { Write-CleanupLog "ACTION: Deleted $($_.FullName)" }
+                if ($files.Count -gt 5) { Write-CleanupLog "... and $($files.Count - 5) more in $t" }
+                $files | Remove-Item -Force -ErrorAction SilentlyContinue
+                $Deleted += $files.Count
+            }
+            Write-CleanupLog "Path '$t' - $($files.Count) file(s) deleted."
         }
 
         # [7/9] Archives
         Write-CleanupLog '[7/9] Removing old archived logs from C:\Windows\Logs\...'
         $ac = 0
         Get-ChildItem 'C:\Windows\Logs\*' -Include *.cab,*.gz,*.zip -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.LastWriteTime -lt $Cutoff } |
+            Where-Object { $_.LastWriteTime -lt $Cutoff -and $_.Name -notlike '*.log' -and $_.Attributes -notmatch 'ReparsePoint' } |
             ForEach-Object { Write-CleanupLog "ACTION: Deleted Archive $($_.FullName)"; Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue; $Deleted++; $ac++ }
         Write-CleanupLog "Archives removed: $ac"
 
