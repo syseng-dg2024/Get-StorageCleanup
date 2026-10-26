@@ -4,6 +4,9 @@
     Finds individual files over a size threshold (e.g. runaway .bak, .vhdx, .dmp, .ldf). Report only; deletes nothing.
     .PARAMETER Extension
     Optional filter, e.g. -Extension .bak,.dmp
+    .NOTES
+    Walks the tree manually and skips reparse-point directories, so junction loops
+    (e.g. ProgramData\Application Data) cannot hang the scan.
     #>
     [CmdletBinding()]
     param(
@@ -15,17 +18,28 @@
         [switch]$Quiet
     )
     $minBytes = [long]$ThresholdMB * [long]1048576
-    $skipRegex = '\\(documents and settings|application data|local settings|my documents|system volume information|\$recycle\.bin)\\'
     $extLower = @()
     foreach ($e in $Extension) { $extLower += $e.ToLower() }
     if (-not $Quiet) { Write-AnalyzeLog "  Scanning files >= $ThresholdMB MB under $Path ..." }
-    $found = Get-ChildItem -Path $Path -Recurse -File -Force -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.Length -ge $minBytes -and
-            -not ($_.Attributes -match 'ReparsePoint') -and
-            ($extLower.Count -eq 0 -or $extLower -contains $_.Extension.ToLower()) -and
-            ($_.FullName.ToLower() -notmatch $skipRegex)
-        } | Sort-Object Length -Descending | Select-Object -First $Top
+
+    $root  = (Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue).FullName
+    $found = New-Object System.Collections.ArrayList
+    $stack = New-Object System.Collections.Stack
+    if ($root) { $stack.Push($root) }
+
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+        foreach ($f in (Get-ChildItem -LiteralPath $dir -File -Force -ErrorAction SilentlyContinue)) {
+            if ($f.Length -ge $minBytes -and ($extLower.Count -eq 0 -or $extLower -contains $f.Extension.ToLower())) {
+                [void]$found.Add($f)
+            }
+        }
+        foreach ($d in (Get-ChildItem -LiteralPath $dir -Directory -Force -ErrorAction SilentlyContinue)) {
+            if ($d.Attributes -notmatch 'ReparsePoint') { $stack.Push($d.FullName) }
+        }
+    }
+
+    $found = @($found | Sort-Object Length -Descending | Select-Object -First $Top)
     if ($PassThru) { return $found }
     if (-not $found) { Write-AnalyzeLog "  No files found at or above $ThresholdMB MB."; return }
     $h = "Top $Top largest files under $Path (largest first):"
