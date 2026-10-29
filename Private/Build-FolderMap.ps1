@@ -21,7 +21,7 @@
         $children = Get-ChildItem -LiteralPath $folder -Directory -Force -ErrorAction SilentlyContinue |
             Where-Object { $_.Attributes -notmatch 'ReparsePoint' }
         foreach ($child in $children) {
-            $bytes += Invoke-DirSWithTimeout -Path $child.FullName -TimeoutSec $timeout
+            $bytes += Measure-FolderSize -Path $child.FullName -TimeoutSec $timeout
         }
         $map[$folder] = $bytes
     }

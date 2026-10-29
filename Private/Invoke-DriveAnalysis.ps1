@@ -9,9 +9,11 @@
 
     $root = "$drive\"
     $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$drive'"
+    $pctUsed = [math]::Round((($disk.Size - $disk.FreeSpace) / $disk.Size) * 100, 1)
     Write-AnalyzeLog
     Write-AnalyzeLog ("Total capacity of {0} - {1:N0} GB" -f $drive, ($disk.Size / 1GB))
     Write-AnalyzeLog ("Free space on {0} - {1:N0} GB / {2:N0} MB" -f $drive, ($disk.FreeSpace / 1GB), ($disk.FreeSpace / 1MB))
+    Write-AnalyzeLog ("Drive usage: {0} - {1}% used ({2:N0} GB used of {3:N0} GB)" -f $drive, $pctUsed, (($disk.Size - $disk.FreeSpace) / 1GB), ($disk.Size / 1GB))
 
     $scan = {
         param($path)
