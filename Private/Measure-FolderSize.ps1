@@ -11,7 +11,7 @@ function Measure-FolderSize {
     }
     $bytes = [long]0
     foreach ($line in (Get-Content "$env:TEMP\gsc_rc_$PID.out" -ErrorAction SilentlyContinue)) {
-        if ($line -match '^\s*Bytes\s*:\s*([\d\s]+)') { $bytes = [long]($Matches[1] -replace '\s','') }
+        if ($line -match '^\s*Bytes\s*:\s*(\d+)') { $bytes = [long]$Matches[1] }
     }
     Remove-Item "$env:TEMP\gsc_rc_$PID.out","$env:TEMP\gsc_rc_$PID.err" -Force -ErrorAction SilentlyContinue
     return $bytes
